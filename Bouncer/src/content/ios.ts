@@ -1,8 +1,10 @@
 // iOS FAB, filtered modal, native sheet bridge
 
 import type { IOSDeps, DescriptionKey, SiteId } from '../types';
-import { clampThreshold, clampImageThreshold, clampReplyThreshold, getDescriptions, setDescriptions, getStorage, setStorage, aiIntentActiveForSite, getExcludedAccounts, setExcludedAccounts, normalizeAccountIdentity } from '../shared/storage';
+import { clampThreshold, clampImageThreshold, clampReplyThreshold, getDescriptions, getActiveDescriptions, getStorage, setStorage, aiIntentActiveForSite, getExcludedAccounts, setExcludedAccounts, normalizeAccountIdentity } from '../shared/storage';
 import { platformById, descriptionsStorageKey } from '../shared/platforms';
+import { loadRules, saveRule, addRuleLines, removeRule, type EditableRule } from '../shared/rule-storage';
+import { AI_FEED_STARTER_RULES, activeRuleDescriptions } from '../shared/rules';
 import { parseHTML } from '../shared/utils';
 import { shareFilterPackForIOS, toggleAiDetectionViaPhrases } from './ui';
 
@@ -10,6 +12,10 @@ import { shareFilterPackForIOS, toggleAiDetectionViaPhrases } from './ui';
 // handler injected by WKWebView. Declaring them here gives ESLint/TS proper
 // types and removes the need for `as any` casts throughout this file.
 interface FFWindow {
+  __ff_getRules?: (siteId: string) => Promise<EditableRule[]>;
+  __ff_saveRule?: (siteId: string, original: string | null, rule: EditableRule) => Promise<void>;
+  __ff_addRuleLines?: (siteId: string, text: string) => Promise<number>;
+  __ff_ruleStarter?: () => string;
   __ff_addPhrase?: (text: string) => Promise<boolean>;
   __ff_removePhrase?: (phrase: string) => Promise<void>;
   // Platform-scoped phrase accessors used by the native sheet's platform
@@ -100,6 +106,22 @@ export function initIOS(deps: IOSDeps) {
   const descKeyFor = (siteId: string): DescriptionKey | null =>
     platformById(siteId) ? descriptionsStorageKey(siteId as SiteId) : null;
 
+  const requireSite = (id: string): SiteId => {
+    if (!platformById(id)) throw new Error('Unknown platform.');
+    return id as SiteId;
+  };
+  w.__ff_getRules = async (siteId) => loadRules(requireSite(siteId));
+  w.__ff_saveRule = async (siteId, original, rule) => {
+    await saveRule(requireSite(siteId), original, rule);
+    updateIOSFilteredCount();
+  };
+  w.__ff_addRuleLines = async (siteId, text) => {
+    const count = await addRuleLines(requireSite(siteId), text);
+    updateIOSFilteredCount();
+    return count;
+  };
+  w.__ff_ruleStarter = () => AI_FEED_STARTER_RULES.join('\n');
+
   w.__ff_getPhrases = async (siteId: string): Promise<string[]> => {
     const key = descKeyFor(siteId);
     return key ? await getDescriptions(key) : [];
@@ -108,17 +130,16 @@ export function initIOS(deps: IOSDeps) {
     const key = descKeyFor(siteId);
     const t = (text || '').trim();
     if (!key || !t) return false;
-    const cur = await getDescriptions(key);
-    if (cur.includes(t)) return false;
-    await setDescriptions(key, [...cur, t]);
+    const rules = await loadRules(requireSite(siteId));
+    if (rules.some(rule => rule.text === t)) return false;
+    await saveRule(requireSite(siteId), null, { text: t, enabled: true, threshold: 0.85 });
     updateIOSFilteredCount();
     return true;
   };
   w.__ff_removePhraseFor = async (siteId: string, phrase: string): Promise<void> => {
     const key = descKeyFor(siteId);
     if (!key) return;
-    const cur = await getDescriptions(key);
-    await setDescriptions(key, cur.filter(p => p !== phrase));
+    await removeRule(requireSite(siteId), phrase);
     updateIOSFilteredCount();
   };
 
@@ -189,7 +210,7 @@ export function initIOS(deps: IOSDeps) {
     // aiIntentActiveForSite) — matches what the pipeline actually gates on.
     const [data, sitePhrases] = await Promise.all([
       getStorage(['aiFilterIntent']),
-      getDescriptions(_deps.descriptionsKey),
+      getActiveDescriptions(_deps.descriptionsKey),
     ]);
     return aiIntentActiveForSite(data, sitePhrases);
   };
@@ -225,7 +246,7 @@ export function initIOS(deps: IOSDeps) {
   w.__ff_getAiImageFilterEnabled = async (): Promise<boolean> => {
     const [data, sitePhrases] = await Promise.all([
       getStorage(['aiFilterIntent']),
-      getDescriptions(_deps.descriptionsKey),
+      getActiveDescriptions(_deps.descriptionsKey),
     ]);
     return aiIntentActiveForSite(data, sitePhrases);
   };
@@ -355,9 +376,10 @@ export function updateIOSFilteredCount(aiStateWrite = false) {
   if (!_deps) return;
   if (typeof webkit !== 'undefined' && webkit.messageHandlers?.feedfilterPhrasesUpdated) {
     const count = _deps.getFilteredPosts().length;
-    chrome.storage.local.get([_deps.descriptionsKey, 'aiFilterIntent', 'aiIndicatorBadgeDismissed'], (data) => {
+    const optionsKey = `ruleOptions_${_deps.descriptionsKey.slice('descriptions_'.length)}`;
+    chrome.storage.local.get([_deps.descriptionsKey, optionsKey, 'aiFilterIntent', 'aiIndicatorBadgeDismissed'], (data) => {
       const phrases = (data[_deps.descriptionsKey] as string[] | undefined) || [];
-      const aiOn = aiIntentActiveForSite(data, phrases);
+      const aiOn = aiIntentActiveForSite(data, activeRuleDescriptions(phrases, data[optionsKey]));
       const badgeDismissed = data.aiIndicatorBadgeDismissed === true;
       // First activation dismisses the first-run "REMOVE AI SLOP?" badge
       // forever — the same write refreshAiIndicatorUI does for the desktop

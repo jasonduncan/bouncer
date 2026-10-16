@@ -39,7 +39,7 @@
 // tweet-filter categories (Settings.effectiveDescriptions): "AI slop"
 // engages the AI detector instead of hiding human posts about AI slop.
 
-import { getStorage, setStorage, getDescriptions, phraseSetKey } from '../shared/storage';
+import { getStorage, setStorage, getActiveDescriptions, phraseSetKey } from '../shared/storage';
 import { isAiDetectionPhrase } from '../shared/utils';
 import { PLATFORMS } from '../shared/platforms';
 import { DEFAULT_MODEL, PREDEFINED_MODELS } from '../shared/models';
@@ -154,7 +154,7 @@ export async function recordAiIntentVerdict(
 async function currentPhraseUnion(): Promise<string[]> {
   const all: string[] = [];
   for (const p of PLATFORMS) {
-    all.push(...await getDescriptions(`descriptions_${p.id}`));
+    all.push(...await getActiveDescriptions(`descriptions_${p.id}`));
   }
   return [...new Set(all)];
 }

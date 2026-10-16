@@ -1,5 +1,7 @@
 # Bouncer
 
+This development branch adds **Jev-powered custom rules for the iPhone app**: write or paste natural-language rules, edit them, pause individual rules, and set a match threshold for each. See [setup and rule behavior](docs/jev-rules.md). The App Store and Web Store links below are upstream releases; they do not include these changes.
+
 <p align="center">
   <img src="Bouncer/icons/icon128.png" alt="Bouncer" width="128" />
 </p>
@@ -28,6 +30,7 @@
 | Provider | Models                                     | Requires |
 |----------|--------------------------------------------|----------|
 | **Local (WebGPU)** | Gemma 4 E4B (Instruct)                     | WebGPU-capable browser |
+| **TypeSafe** | Jev (`jev-latest`), text rule scoring | API key |
 | **OpenAI** | GPT-5 Nano, gpt-oss-20b                    | API key |
 | **Google Gemini** | 2.5 Flash Lite, 2.5 Flash, 3 Flash Preview | API key |
 | **Anthropic** | Claude Haiku 4.5 | API key |

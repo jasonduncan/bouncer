@@ -12,7 +12,7 @@ import {
 } from '../shared/share-encoding';
 import type { BackgroundToContentMessage, ContentUIDeps, FilteredPost, PipelineResponse, PostContent, LocalModelStatus } from '../types';
 import {
-  getStorage, setStorage, getDescriptions, setDescriptions,
+  getStorage, setStorage, getDescriptions, getActiveDescriptions, setDescriptions,
   aiIntentActiveForSite,
   getFilteringPaused, setFilteringPaused,
   getExcludedAccounts, setExcludedAccounts, exclusionIdentity,
@@ -1064,7 +1064,7 @@ export async function refreshAiIndicatorUI(): Promise<void> {
   if (!_deps) return;
   const [data, sitePhrases] = await Promise.all([
     getStorage(['aiFilterIntent', 'aiIndicatorBadgeDismissed']),
-    getDescriptions(_deps.descriptionsKey),
+    getActiveDescriptions(_deps.descriptionsKey),
   ]);
   const on = aiIntentActiveForSite(data, sitePhrases);
   // First-run onboarding: the indicator wears a "REMOVE AI" pill badge until
@@ -2391,6 +2391,7 @@ export async function removeFilterPhrase(phrase: string) {
 export async function restoreOrRefreshFilteredPosts(
   removedPhrases: string[],
   restoreReason: string,
+  forceReevaluation = false,
 ): Promise<void> {
   const removedLc = new Set(removedPhrases.map(p => p.toLowerCase()));
   // Snapshot before mutation — restoreFilteredPost splices entries out of
@@ -2398,7 +2399,7 @@ export async function restoreOrRefreshFilteredPosts(
   const snapshot = filteredPosts.slice();
 
   for (const fp of snapshot) {
-    const decision = decideFilterRemoval(fp.matches, fp.category, removedLc);
+    const decision = forceReevaluation ? { kind: 'reevaluate' as const } : decideFilterRemoval(fp.matches, fp.category, removedLc);
     if (decision.kind === 'unaffected') continue;
 
     try {
@@ -2409,6 +2410,8 @@ export async function restoreOrRefreshFilteredPosts(
         type: 'clearSinglePost',
         post: fp.evaluationText,
         imageUrls: fp.post.imageUrls || [],
+        postUrl: fp.post.postUrl || null,
+        siteId: _deps.adapter.siteId,
       });
 
       if (decision.kind === 'restore') {
@@ -2436,7 +2439,10 @@ export async function restoreOrRefreshFilteredPosts(
         siteId: _deps.adapter.siteId,
       });
 
-      if (!response || 'retry' in response || 'error' in response) continue;
+      if (!response || 'retry' in response || 'error' in response) {
+        if (forceReevaluation) restoreFilteredPost(fp, 'Rule changed; no current decision available.');
+        continue;
+      }
 
       if (!response.shouldHide) {
         restoreFilteredPost(fp, restoreReason);
@@ -2447,6 +2453,7 @@ export async function restoreOrRefreshFilteredPosts(
         fp.rawResponse = response.rawResponse ?? '';
       }
     } catch (err) {
+      if (forceReevaluation) restoreFilteredPost(fp, 'Rule changed; no current decision available.');
       console.error('[Bouncer] re-evaluate after filter removal failed:', err);
     }
   }

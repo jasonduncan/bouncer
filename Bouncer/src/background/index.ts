@@ -435,7 +435,7 @@ async function handleMessage(
 
     case 'getErrorStatus': {
       const settings = await getSettings();
-      const hasAlternativeApis = !!(settings.openaiApiKey || settings.geminiApiKey || settings.openrouterApiKey || settings.anthropicApiKey);
+      const hasAlternativeApis = !!(settings.typesafeApiKey || settings.openaiApiKey || settings.geminiApiKey || settings.openrouterApiKey || settings.anthropicApiKey);
       return {
         errorType: errorState.type,
         subType: errorState.subType,
@@ -855,7 +855,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     const changedDescriptionKeys = Object.keys(changes).filter(
       key => key.startsWith('descriptions_')
     );
-    const filtersChanged = changedDescriptionKeys.length > 0;
+    const ruleOptionsChanged = Object.keys(changes).some(key => key.startsWith('ruleOptions_'));
+    const filtersChanged = changedDescriptionKeys.length > 0 || ruleOptionsChanged;
+    if (ruleOptionsChanged) await handleSettingsChange(changes);
     // Structural phrases ("no retweets", "videos") never reach the model —
     // getSettings excludes them from its category list and the content
     // script resolves them deterministically. An edit that only touches
@@ -909,11 +911,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     }
 
     // Also retry error posts when API keys change (even without other settings changes)
-    if (changes.openaiApiKey || changes.geminiApiKey || changes.openrouterApiKey || changes.anthropicApiKey) {
+    if (changes.typesafeApiKey || changes.openaiApiKey || changes.geminiApiKey || changes.openrouterApiKey || changes.anthropicApiKey) {
       // Clear auth error for the provider whose key changed
       const authData = await getStorage(['authErrorApis']);
       const authErrorApis = { ...(authData.authErrorApis || {}) };
       let authChanged = false;
+      if (changes.typesafeApiKey && authErrorApis.typesafe) { delete authErrorApis.typesafe; authChanged = true; }
       if (changes.openaiApiKey && authErrorApis.openai) { delete authErrorApis.openai; authChanged = true; }
       if (changes.geminiApiKey && authErrorApis.gemini) { delete authErrorApis.gemini; authChanged = true; }
       if (changes.openrouterApiKey && authErrorApis.openrouter) { delete authErrorApis.openrouter; authChanged = true; }

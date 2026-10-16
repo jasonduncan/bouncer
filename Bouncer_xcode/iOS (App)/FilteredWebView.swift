@@ -16,6 +16,16 @@
 import SwiftUI
 import WebKit
 
+// Never forward a BYOK Authorization header through an HTTP redirect.
+private final class JevNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
 // MARK: - Thin SwiftUI wrapper
 
 struct FilteredWebView: UIViewRepresentable {
@@ -87,6 +97,7 @@ struct FilteredWebView: UIViewRepresentable {
             // Reply-style handler backing chrome.storage.local/sync with a native
             // UserDefaults store, shared across origins (x.com, m.youtube.com, linkedin.com).
             contentController.addScriptMessageHandler(coordinator, contentWorld: world, name: "feedfilterStorage")
+            contentController.addScriptMessageHandler(coordinator, contentWorld: world, name: "feedfilterJev")
             // iOS Local Inference: classify/detect bridges for the on-device Gemma model.
             contentController.add(coordinator, contentWorld: world, name: "feedfilterLocalClassify")
             contentController.add(coordinator, contentWorld: world, name: "feedfilterLocalAiTextDetect")
@@ -611,6 +622,51 @@ struct FilteredWebView: UIViewRepresentable {
             didReceive message: WKScriptMessage,
             replyHandler: @escaping (Any?, String?) -> Void
         ) {
+            if message.name == "feedfilterJev" {
+                guard message.frameInfo.isMainFrame,
+                      let body = message.body as? [String: Any],
+                      let apiKey = body["apiKey"] as? String, !apiKey.isEmpty,
+                      let payload = body["request"] as? [String: Any],
+                      JSONSerialization.isValidJSONObject(payload),
+                      let data = try? JSONSerialization.data(withJSONObject: payload) else {
+                    replyHandler(nil, "TypeSafe request is invalid.")
+                    return
+                }
+                Task { @MainActor in
+                    // Ephemeral networking never includes the social site's cookies.
+                    // Use one fixed provider endpoint, never a page-supplied URL.
+                    let configuration = URLSessionConfiguration.ephemeral
+                    configuration.httpCookieStorage = nil
+                    configuration.urlCredentialStorage = nil
+                    configuration.urlCache = nil
+                    configuration.timeoutIntervalForRequest = 30
+                    configuration.timeoutIntervalForResource = 30
+                    let session = URLSession(configuration: configuration,
+                                             delegate: JevNoRedirectDelegate(), delegateQueue: nil)
+                    defer { session.invalidateAndCancel() }
+                    var request = URLRequest(url: URL(string: "https://api.typesafe.ai/v1/systemone")!)
+                    request.httpMethod = "POST"
+                    request.httpBody = data
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    do {
+                        let (responseData, response) = try await session.data(for: request)
+                        guard let http = response as? HTTPURLResponse else {
+                            replyHandler(nil, "TypeSafe returned an invalid response.")
+                            return
+                        }
+                        // Never pass provider error bodies back: they may echo post text.
+                        let result: Any = (200..<300).contains(http.statusCode)
+                            ? ((try? JSONSerialization.jsonObject(with: responseData)) ?? NSNull())
+                            : NSNull()
+                        replyHandler(["status": http.statusCode, "body": result], nil)
+                    } catch {
+                        replyHandler(nil, "TypeSafe request failed or timed out. Post kept visible.")
+                    }
+                }
+                return
+            }
+
             if message.name == WebPushBridge.handlerName {
                 let body = message.body
                 Task { @MainActor in

@@ -2,7 +2,7 @@
 // Entry point: post processing, observers, init, storage/message listeners
 
 import type { PlatformAdapter, PostContent, PipelineResponse, BackgroundToContentMessage, DescriptionKey, AiFilterIntentState } from '../types';
-import { getStorage, removeStorage, getDescriptions, setDescriptions, phraseSetKey, filteringPausedKeyFor, getExcludedAccounts, exclusionIdentity, excludedAccountsKeyFor } from '../shared/storage';
+import { getStorage, removeStorage, getDescriptions, getActiveDescriptions, setDescriptions, phraseSetKey, filteringPausedKeyFor, getExcludedAccounts, exclusionIdentity, excludedAccountsKeyFor } from '../shared/storage';
 import { enabledStorageKey } from '../shared/platforms';
 import { hexToRgbChannels, hexToDarkRgbChannels, contrastTextColor } from '../shared/brand-color';
 import { FILTER_PACK_CODE_PREFIX } from '../shared/share-encoding';
@@ -396,7 +396,7 @@ import {
     let structuralMatch: { phrase: string; kind: StructuralKind } | null = null;
     if (STRUCTURAL_FILTER_SITES.has(adapter.siteId)) {
       try {
-        structuralMatch = findStructuralMatch(await getDescriptions(descriptionsKey), content);
+        structuralMatch = findStructuralMatch(await getActiveDescriptions(descriptionsKey), content);
       } catch { /* storage unavailable — fall through to the model */ }
     }
     if (structuralOnly && !structuralMatch) return;
@@ -793,7 +793,7 @@ import {
     filterReplies = data.filterReplies !== false;
     keepOnlyMode = keepOnlyAvailable && data.linkedinKeepOnly === true;
     setKeepOnlyMode(keepOnlyMode);
-    sitePhraseCount = (await getDescriptions(descriptionsKey)).length;
+    sitePhraseCount = (await getActiveDescriptions(descriptionsKey)).length;
 
     // Platform is off — don't inject any UI, don't observe posts, don't
     // wire up any listeners beyond the one that watches for re-enable.
@@ -888,6 +888,18 @@ import {
         const newModel = (changes.selectedModel.newValue as string) || 'imbue';
         isLocalModelActive = newModel.startsWith('local:') || false;
       }
+      const ruleOptionsChanged = !!changes[`ruleOptions_${adapter.siteId}`];
+      if (ruleOptionsChanged) {
+        void (async () => {
+          sitePhraseCount = (await getActiveDescriptions(descriptionsKey)).length;
+          await chrome.runtime.sendMessage({ type: 'clearCache' });
+          reEvaluateAllPosts();
+          await restoreOrRefreshFilteredPosts([], 'Rule changed; post no longer matches.', true);
+          applyStructuralFilters();
+          await refreshAiIndicatorUI();
+          if (IS_IOS) updateIOSFilteredCount(true);
+        })().catch(err => console.error('[Bouncer] rule options update failed:', err));
+      }
       if (changes[descriptionsKey]) {
         void syncFilterPhrases();
         // The AI-detection state is per-platform (this platform's phrases ∩
@@ -899,14 +911,16 @@ import {
         refreshAiIndicatorUI().catch(err => console.error('[Bouncer] refreshAiIndicatorUI failed:', err));
         const oldDescs = (changes[descriptionsKey].oldValue as string[] | undefined) || [];
         const newDescs = (changes[descriptionsKey].newValue as string[] | undefined) || [];
-        sitePhraseCount = newDescs.length;
+        void getActiveDescriptions(descriptionsKey).then(ds => { sitePhraseCount = ds.length; });
         // Only re-evaluate when a phrase was added, not removed. Planting the
         // seed phrase alone must not sweep (phraseAddNeedsReEvaluation): it is
         // not a filter category, and the aiFilterIntent write it provokes runs
         // the sweep below that engages the detectors. Reading the intent state
         // races that write; losing the race sweeps redundantly (the old
         // behavior), never skips a needed sweep.
-        if (newDescs.length > oldDescs.length) {
+        if (ruleOptionsChanged) {
+          // Full re-evaluation above also restores posts hidden by edited rules.
+        } else if (newDescs.some(d => !oldDescs.includes(d))) {
           // Adds that are purely structural ("no retweets", "videos") change
           // nothing the model sees — skip the full pending-UI sweep and just
           // apply the deterministic filters to the visible feed.

@@ -10,9 +10,11 @@ import { PREDEFINED_MODELS, API_DISPLAY_NAMES, DEFAULT_MODEL } from '../shared/m
 import { buildAPIMessages, parseTableYesnoResponse } from '../shared/prompts';
 import { callDirectAPI, callAnthropicAPI, callImbueAPI, callImbueAiTextDetection, callImbueAiImageDetection } from './providers';
 import { runDetectors, type Detector, type DetectorResult } from './detectors';
+import { callJevAPI } from './jev';
+import { AI_FEED_STARTER_RULES, activeRuleDescriptions } from '../shared/rules';
 import { callLocalInference, localEngine } from './local-model';
 import { iosLocalClassify, iosLocalGenerate, iosLocalAiTextDetect } from './ios-local-bridge';
-import { getStorage, setStorage, removeStorage, getDescriptions, getFilteringPaused, clampThreshold, clampImageThreshold, clampReplyThreshold, aiIntentActiveForSite, DEFAULT_AI_TEXT_DETECTION_THRESHOLD, DEFAULT_AI_IMAGE_DETECTION_THRESHOLD } from '../shared/storage';
+import { getStorage, setStorage, removeStorage, getDescriptions, getRuleOptions, getFilteringPaused, clampThreshold, clampImageThreshold, clampReplyThreshold, aiIntentActiveForSite, DEFAULT_AI_TEXT_DETECTION_THRESHOLD, DEFAULT_AI_IMAGE_DETECTION_THRESHOLD } from '../shared/storage';
 import { canJudgeAiIntent } from './ai-intent';
 import { STRUCTURAL_FILTER_SITES, structuralFilterKind } from '../shared/structural-filters';
 import { AI_TEXT_DETECTOR_CATEGORIES, AI_IMAGE_DETECTOR_CATEGORIES } from '../shared/filter-removal';
@@ -173,9 +175,11 @@ async function runDetectorsAndCaptureSnapshots(
   snapshots: Map<string, DetectorSnapshot>,
   tabId: number,
   evaluationId: string,
+  generation: number,
 ): Promise<DetectorResult> {
   const result = await runDetectors(detectors, {
     onResponse: (detName, value, error) => {
+      if (generation !== settingsGeneration) return;
       if (value) {
         snapshots.set(detName, {
           status: 'success',
@@ -322,6 +326,7 @@ function buildDetectorStates(
 
 // Map API names to their corresponding settings key for API key lookup
 const API_KEY_SETTINGS: Record<string, keyof Settings> = {
+  typesafe: 'typesafeApiKey',
   openrouter: 'openrouterApiKey',
   openai: 'openaiApiKey',
   gemini: 'geminiApiKey',
@@ -334,6 +339,7 @@ export let evaluationCache = new Map<string, EvaluationResult>();
 let batchTimeout: ReturnType<typeof setTimeout> | null = null;
 let inFlightBatches = 0; // Counter for concurrent batch processing
 let cacheLoaded = false;
+let settingsGeneration = 0;
 
 // Per-tab queue management
 const tabQueues = new Map<number, PendingEvaluation[]>();      // tabId -> array of queue items
@@ -518,18 +524,20 @@ export async function getSettings(siteId?: SiteId): Promise<Settings> {
   const platformEnabledKeys = PLATFORMS.map(p => enabledStorageKey(p.id));
   const settingsKeys = [
     'apiKey', 'openaiApiKey', 'openaiApiBase', 'openrouterApiKey', 'geminiApiKey',
-    'anthropicApiKey', 'enabled', 'useEmbeddings', 'selectedModel',
+    'anthropicApiKey', 'typesafeApiKey', 'enabled', 'useEmbeddings', 'selectedModel',
     'customModels', 'predefinedModelKwargs', 'aiTextDetectionThreshold',
     'aiTextReplyDetectionThreshold', 'aiImageDetectionThreshold',
     'aiFilterIntent',
     'filterReplies',
     ...platformEnabledKeys,
   ] as const;
-  const [data, descriptions, paused] = await Promise.all([
+  const [data, allDescriptions, paused, ruleOptions] = await Promise.all([
     getStorage([...settingsKeys]),
     descriptionsKey ? getDescriptions(descriptionsKey) : Promise.resolve([] as string[]),
-    siteId ? getFilteringPaused(siteId) : Promise.resolve(false)
+    siteId ? getFilteringPaused(siteId) : Promise.resolve(false),
+    siteId ? getRuleOptions(siteId) : Promise.resolve({}),
   ]);
+  const descriptions = activeRuleDescriptions(allDescriptions, ruleOptions);
   const platformEnabled: Partial<Record<SiteId, boolean>> = {};
   for (const p of PLATFORMS) {
     platformEnabled[p.id] = data[enabledStorageKey(p.id)] !== false;
@@ -563,6 +571,8 @@ export async function getSettings(siteId?: SiteId): Promise<Settings> {
   }
 
   return {
+    ruleOptions,
+    typesafeApiKey: data.typesafeApiKey || '',
     apiKey: data.apiKey || '',
     openaiApiKey: data.openaiApiKey || '',
     openaiApiBase: data.openaiApiBase || '',
@@ -598,7 +608,7 @@ export async function getSettings(siteId?: SiteId): Promise<Settings> {
 // Broadcast unified error status to all tabs
 export async function broadcastErrorStatus(): Promise<void> {
   const settings = await getSettings();
-  const hasAlternativeApis = !!(settings.openaiApiKey || settings.geminiApiKey || settings.openrouterApiKey || settings.anthropicApiKey);
+  const hasAlternativeApis = !!(settings.typesafeApiKey || settings.openaiApiKey || settings.geminiApiKey || settings.openrouterApiKey || settings.anthropicApiKey);
 
   const status: BackgroundToContentMessage = {
     type: 'errorStatusUpdate',
@@ -697,7 +707,7 @@ export function getLatencySampleCount(): number {
 
 async function broadcastLatencyStatus(): Promise<void> {
   const settings = await getSettings();
-  const hasAlternativeApis = !!(settings.openaiApiKey || settings.geminiApiKey || settings.openrouterApiKey || settings.anthropicApiKey);
+  const hasAlternativeApis = !!(settings.typesafeApiKey || settings.openaiApiKey || settings.geminiApiKey || settings.openrouterApiKey || settings.anthropicApiKey);
 
   const status: BackgroundToContentMessage = {
     type: 'latencyUpdate',
@@ -795,6 +805,7 @@ export async function saveCache(immediate = false): Promise<void> {
 }
 
 export async function clearEvaluationCache(): Promise<void> {
+  settingsGeneration++;
   // Cancel any pending debounced write so it can't re-persist entries that
   // were just cleared.
   if (saveCacheTimer !== null) {
@@ -914,10 +925,15 @@ async function processBatch(): Promise<void> {
   if (!pendingEvaluations || pendingEvaluations.length === 0) return;
 
   inFlightBatches++;
+  const generation = settingsGeneration;
 
   const settings = await getSettings(pendingEvaluations[0]?.siteId);
   const isLocalModel = settings.selectedModel?.startsWith('local:');
   const isIosLocalModel = settings.selectedModel?.startsWith('iosLocal:');
+  if (settings.selectedModel.startsWith('typesafe:') && inFlightBatches > 4) {
+    inFlightBatches--;
+    return; // A finishing Jev request schedules the next post.
+  }
 
   // Local models serialize inference, so limit to 1 in-flight batch to ensure
   // viewport prioritization stays fresh (re-sorted before each dequeue).
@@ -932,6 +948,12 @@ async function processBatch(): Promise<void> {
   // center — both serialize to one in-flight inference, so order matters.
   if ((isLocalModel || isIosLocalModel) && pendingEvaluations.length > 0) {
     await prioritizeByViewportDistance(pendingEvaluations);
+  }
+
+  if (generation !== settingsGeneration) {
+    inFlightBatches--;
+    scheduleBatch();
+    return;
   }
 
   // Grab one post from the queue (re-check length — async ops above may have drained it)
@@ -1058,6 +1080,8 @@ async function processBatch(): Promise<void> {
           matches: null,
           rawResponse: imbueResponse.rawResponse || null,
         };
+      } else if (apiConfig.apiName === 'typesafe') {
+        return await callJevAPI(postData, settings.effectiveDescriptions, apiConfig, settings.ruleOptions);
       } else if (apiConfig.apiName === 'anthropic') {
         const messages = buildAPIMessages(postData, settings.effectiveDescriptions);
         const rawContent = await callAnthropicAPI(messages, apiConfig);
@@ -1108,6 +1132,7 @@ async function processBatch(): Promise<void> {
         snapshots,
         batchTabId,
         item.evaluationId,
+        generation,
       );
     }
 
@@ -1117,6 +1142,13 @@ async function processBatch(): Promise<void> {
     const evalSec = ((Date.now() - startTime) / 1000).toFixed(2);
     const inferPart = result.inferenceTime != null ? ` infer=${result.inferenceTime.toFixed(2)}s` : '';
     console.log(`[Eval] shouldHide=${result.shouldHide}, category="${result.category}", wall=${evalSec}s${inferPart}, reasoning="${result.reasoning?.substring(0, 80)}"`);
+
+    if (generation !== settingsGeneration) {
+      resolveWithDuplicates(batchTabId, item, { retry: true, reasoning: 'Rules changed; discarding the previous decision.' });
+      inFlightBatches--;
+      scheduleBatch();
+      return;
+    }
 
     // Union the matches from every hide-asserting detector. If any of them is
     // "incomplete" (matches == null — e.g. API filter that only returned its
@@ -1180,8 +1212,15 @@ async function processBatch(): Promise<void> {
       await clearErrorState();
       broadcastToTabs({ type: 'reEvaluateErrors' });
     }
-    resolveWithDuplicates(batchTabId, item, evalResult);
+    resolveWithDuplicates(batchTabId, item, generation === settingsGeneration
+      ? evalResult : { retry: true, reasoning: 'Rules changed; re-evaluating.' });
   } catch (error) {
+    if (generation !== settingsGeneration) {
+      resolveWithDuplicates(batchTabId, item, { retry: true, reasoning: 'Rules changed; re-evaluating.' });
+      inFlightBatches--;
+      scheduleBatch();
+      return;
+    }
     // Handle inference preempted (user scrolled past) — re-queue and process next
     if ((error as Error).message === 'Inference preempted') {
       const currentQueue = tabQueues.get(batchTabId);
@@ -1302,6 +1341,7 @@ export function scheduleBatch(): void {
 // and queued classifications to be retried against fresh settings while keeping cached
 // classifications intact.
 function flushPipelineQueues(reason: string): void {
+  settingsGeneration++;
   if (batchTimeout) {
     clearTimeout(batchTimeout);
     batchTimeout = null;
@@ -1317,7 +1357,7 @@ function flushPipelineQueues(reason: string): void {
   }
   localEngine.clearQueue();
   broadcastQueueStatus().catch(err => console.error('[Queue] Broadcast failed:', err));
-  inFlightBatches = 0;
+  // Running requests decrement their own counters when they settle.
 }
 
 // Called from index.ts when settings change to reset pipeline state.
@@ -1338,11 +1378,12 @@ export async function handleSettingsChange(changes: Record<string, chrome.storag
       || changes.aiTextDetectionThreshold
       || changes.aiTextReplyDetectionThreshold
       || changes.aiImageDetectionThreshold
-      || changes.aiFilterIntent) {
+      || changes.aiFilterIntent
+      || Object.keys(changes).some(key => key.startsWith('ruleOptions_'))) {
     await clearEvaluationCache();
   }
 
-  if ((changes.selectedModel || changes.openaiApiKey || changes.geminiApiKey || changes.openrouterApiKey || changes.anthropicApiKey) && errorState.count > 0) {
+  if ((changes.typesafeApiKey || changes.selectedModel || changes.openaiApiKey || changes.geminiApiKey || changes.openrouterApiKey || changes.anthropicApiKey) && errorState.count > 0) {
     triggerErrorRetry().catch(err => console.error('[Error] triggerErrorRetry failed:', err));
   }
 }
@@ -1413,6 +1454,7 @@ async function validateFilterPhrase(postText: string, imageUrls: string[], phras
     if (apiName === 'openai' && settings.openaiApiBase) {
       apiConfig.apiBase = settings.openaiApiBase;
     }
+    if (apiName === 'typesafe') return (await callJevAPI(postData, [phrase], apiConfig, settings.ruleOptions)).shouldHide;
     const messages = buildAPIMessages(postData, [phrase]);
     const callFn = apiName === 'anthropic' ? callAnthropicAPI : callDirectAPI;
     const rawContent = await callFn(messages, apiConfig);
@@ -1425,6 +1467,13 @@ async function validateFilterPhrase(postText: string, imageUrls: string[], phras
 async function generateCandidatePhrases(postText: string, imageUrls: string[], count: number, rejectPhrases: string[], settings: Settings): Promise<string[]> {
   const isLocalModel = settings.selectedModel?.startsWith('local:');
   const isIosLocalModel = settings.selectedModel?.startsWith('iosLocal:');
+  if (settings.selectedModel.startsWith('typesafe:')) {
+    const candidates = AI_FEED_STARTER_RULES.filter(rule => !rejectPhrases.includes(rule.toLowerCase()));
+    const result = await callJevAPI({ text: postText, imageUrls }, candidates, {
+      apiName: 'typesafe', modelName: settings.selectedModel.slice('typesafe:'.length), apiKey: settings.typesafeApiKey,
+    });
+    return (result.matches ?? []).slice(0, count);
+  }
 
   const rejected = rejectPhrases.length > 0
     ? ` Do NOT suggest any of these: ${rejectPhrases.join(', ')}.`

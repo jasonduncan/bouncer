@@ -95,6 +95,15 @@ final class WebViewCache: ObservableObject {
     }
 }
 
+// MARK: - Custom rules
+
+struct NativeFilterRule: Identifiable, Decodable {
+    var text: String
+    var enabled: Bool = true
+    var threshold: Double = 0.85
+    var id: String { text }
+}
+
 // MARK: - ViewModel
 
 // @MainActor: this ObservableObject holds a WebViewCache that touches
@@ -106,6 +115,8 @@ final class WebViewCache: ObservableObject {
 class FilterSheetViewModel: ObservableObject {
     @Published var isPresented = false
     @Published var phrases: [String] = []
+    @Published var rules: [NativeFilterRule] = []
+    @Published var starterRulesText = ""
     @Published var themeMode: String = "dark"  // kept for JS bridge communication
     // Per-platform filtered-post counts. Each cached webview reports its own
     // count via feedfilterShowSheet / feedfilterPhrasesUpdated; the badge and
@@ -314,22 +325,48 @@ class FilterSheetViewModel: ObservableObject {
         Task { @MainActor in
             do {
                 let result = try await webView.callAsyncJavaScript(
-                    "return await window.__ff_getPhrases(siteId)",
+                    "return {rules: await window.__ff_getRules(siteId), starter: window.__ff_ruleStarter()}",
                     arguments: ["siteId": platform],
                     in: nil,
                     contentWorld: Self.contentWorld
                 )
                 // Ignore a stale response if the user switched platforms mid-flight.
                 guard platform == self.selectedPlatform else { return }
-                if let arr = result as? [String] {
-                    self.phrases = arr
-                } else if let arr = result as? [Any] {
-                    self.phrases = arr.compactMap { $0 as? String }
+                if let result = result as? [String: Any], let rows = result["rules"] as? [[String: Any]] {
+                    let data = try JSONSerialization.data(withJSONObject: rows)
+                    self.rules = try JSONDecoder().decode([NativeFilterRule].self, from: data)
+                    self.phrases = self.rules.map(\.text)
+                    self.starterRulesText = result["starter"] as? String ?? ""
                 }
             } catch {
                 print("[FeedFilter] loadPhrases error: \(error)")
             }
         }
+    }
+
+    func rule(for phrase: String) -> NativeFilterRule {
+        rules.first(where: { $0.text == phrase }) ?? NativeFilterRule(text: phrase)
+    }
+
+    func saveRule(original: String?, rule: NativeFilterRule, platform: String) async throws {
+        guard let webView = webView else { throw URLError(.notConnectedToInternet) }
+        _ = try await webView.callAsyncJavaScript(
+            "return await window.__ff_saveRule(siteId, original, rule)",
+            arguments: ["siteId": platform, "original": original as Any? ?? NSNull(),
+                        "rule": ["text": rule.text, "enabled": rule.enabled, "threshold": rule.threshold]],
+            in: nil, contentWorld: Self.contentWorld
+        )
+        if platform == selectedPlatform { loadPhrases() }
+    }
+
+    func addRuleLines(_ text: String, platform: String) async throws {
+        guard let webView = webView else { throw URLError(.notConnectedToInternet) }
+        _ = try await webView.callAsyncJavaScript(
+            "return await window.__ff_addRuleLines(siteId, text)",
+            arguments: ["siteId": platform, "text": text],
+            in: nil, contentWorld: Self.contentWorld
+        )
+        if platform == selectedPlatform { loadPhrases() }
     }
 
     func addPhrase(_ text: String) {
@@ -1092,8 +1129,21 @@ struct FilterPhraseSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    NavigationLink {
+                        RuleEditorView(viewModel: viewModel, original: nil)
+                    } label: { Label("Write a rule", systemImage: "plus") }
+                    NavigationLink {
+                        BulkRulesView(viewModel: viewModel, initialText: "")
+                    } label: { Label("Paste several rules", systemImage: "text.badge.plus") }
+                    NavigationLink {
+                        BulkRulesView(viewModel: viewModel, initialText: viewModel.starterRulesText)
+                    } label: { Label("AI feed starter rules", systemImage: "sparkles") }
+                } footer: {
+                    Text("Write exactly what you don’t want to see, including exceptions. Any matching enabled rule hides a post. Tap a rule to edit or pause it.")
+                }
                 if viewModel.phrases.isEmpty {
-                    Text("No filter topics added yet.")
+                    Text("No rules yet. Your feed, your rules.")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1104,10 +1154,16 @@ struct FilterPhraseSheet: View {
                 } else {
                     ForEach(viewModel.phrases.reversed(), id: \.self) { phrase in
                         HStack {
-                            Text(phrase)
-                                .font(.system(size: 19, weight: .regular))
-                                .foregroundStyle(.primary)
-                                .padding(.leading, 8)
+                            NavigationLink {
+                                RuleEditorView(viewModel: viewModel, original: phrase)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(phrase).font(.body)
+                                    Text(viewModel.rule(for: phrase).enabled ? "Enabled" : "Paused")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                .opacity(viewModel.rule(for: phrase).enabled ? 1 : 0.5)
+                            }
                             Spacer()
                             Button {
                                 viewModel.removePhrase(phrase)
@@ -1143,7 +1199,7 @@ struct FilterPhraseSheet: View {
                     HStack(spacing: 0) {
                         PersistentKeyboardTextField(
                             text: $newPhrase,
-                            placeholder: "Add a topic to filter...",
+                            placeholder: "Add a rule in your own words...",
                             onSubmit: { submitPhrase() }
                         )
                         .frame(height: 20)
@@ -1180,7 +1236,7 @@ struct FilterPhraseSheet: View {
                 .animation(.none, value: newPhrase)
                 .transaction { $0.animation = nil }
         }
-            .navigationTitle("Filter out")
+            .navigationTitle("Your rules")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 #if DEBUG
@@ -1340,6 +1396,117 @@ struct FilterPhraseSheet: View {
         guard !text.isEmpty else { return }
         viewModel.addPhrase(text)
         newPhrase = ""
+    }
+}
+
+// MARK: - Rule editors
+
+private struct RuleEditorView: View {
+    @ObservedObject var viewModel: FilterSheetViewModel
+    @Environment(\.dismiss) private var dismiss
+    let original: String?
+    let platform: String
+    @State private var text: String
+    @State private var enabled: Bool
+    @State private var threshold: Double
+    @State private var saving = false
+    @State private var error: String?
+
+    init(viewModel: FilterSheetViewModel, original: String?) {
+        self.viewModel = viewModel
+        self.original = original
+        platform = viewModel.selectedPlatform
+        let rule = original.map { viewModel.rule(for: $0) } ?? NativeFilterRule(text: "")
+        _text = State(initialValue: rule.text)
+        _enabled = State(initialValue: rule.enabled)
+        _threshold = State(initialValue: rule.threshold)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                TextEditor(text: $text)
+                    .frame(minHeight: 180)
+                    .accessibilityLabel("Rule text")
+            } header: { Text("Hide a post when…") } footer: {
+                Text("Use a topic, a sentence, or a detailed condition. For example: Hide exaggerated AI claims without evidence, but keep research with concrete results.")
+            }
+            Section {
+                Toggle("Rule enabled", isOn: $enabled)
+                LabeledContent("Jev match threshold", value: "\(Int((threshold * 100).rounded()))%")
+                Slider(value: $threshold, in: 0.5...1, step: 0.05)
+                    .accessibilityLabel("Jev match threshold")
+                    .disabled(!viewModel.selectedModel.hasPrefix("typesafe:"))
+            } footer: {
+                Text("Jev hides a post only when its estimated probability of matching this rule reaches the threshold. Higher values keep more uncertain posts visible. These are model estimates, not verified facts. Thresholds apply when Jev is selected; other providers use their own judgments.")
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+        }
+        .navigationTitle(original == nil ? "New rule" : "Edit rule")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(saving ? "Saving…" : "Save") {
+                    saving = true
+                    error = nil
+                    Task { @MainActor in
+                        do {
+                            try await viewModel.saveRule(original: original,
+                                rule: NativeFilterRule(text: text, enabled: enabled, threshold: threshold),
+                                platform: platform)
+                            dismiss()
+                        } catch { self.error = error.localizedDescription }
+                        saving = false
+                    }
+                }
+                .disabled(saving || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
+}
+
+private struct BulkRulesView: View {
+    @ObservedObject var viewModel: FilterSheetViewModel
+    @Environment(\.dismiss) private var dismiss
+    let platform: String
+    @State private var text: String
+    @State private var saving = false
+    @State private var error: String?
+
+    init(viewModel: FilterSheetViewModel, initialText: String) {
+        self.viewModel = viewModel
+        platform = viewModel.selectedPlatform
+        _text = State(initialValue: initialText)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                TextEditor(text: $text).frame(minHeight: 300)
+                    .accessibilityLabel("Rules, one per line")
+            } header: { Text("One rule per line") } footer: {
+                Text("Paste as many rules as you need. Blank lines and exact duplicates are skipped. Existing rules stay in place. Edit each rule afterward to pause it or tune its Jev threshold.")
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+        }
+        .navigationTitle("Add rules")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(saving ? "Adding…" : "Add rules") {
+                    saving = true
+                    error = nil
+                    Task { @MainActor in
+                        do {
+                            try await viewModel.addRuleLines(text, platform: platform)
+                            dismiss()
+                        } catch { self.error = error.localizedDescription }
+                        saving = false
+                    }
+                }
+                .disabled(saving || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
     }
 }
 
@@ -1799,7 +1966,7 @@ struct AdvancedSettingsView: View {
                 Text("Providers")
             } footer: {
                 if !hasImbueBackend {
-                    Text("This build has no bundled backend. Bring your own OpenAI, Anthropic, Gemini, or OpenRouter API key to classify posts.")
+                    Text("This build has no bundled backend. Bring your own TypeSafe / Jev, OpenAI, Anthropic, Gemini, or OpenRouter API key to classify posts.")
                 }
             }
 
@@ -1976,6 +2143,14 @@ private struct ProviderModel {
 // Mirrors PREDEFINED_MODELS from Bouncer/src/shared/models.ts. Kept in sync
 // manually — the desktop list is the source of truth.
 private let providerSpecs: [ProviderSpec] = [
+    ProviderSpec(
+        id: "typesafe",
+        displayName: "TypeSafe / Jev",
+        storageKey: "typesafeApiKey",
+        placeholder: "TypeSafe API key",
+        helpURL: "https://console.typesafe.ai",
+        models: [ProviderModel(id: "jev-latest", display: "Jev · text rules")]
+    ),
     ProviderSpec(
         id: "openai",
         displayName: "OpenAI",

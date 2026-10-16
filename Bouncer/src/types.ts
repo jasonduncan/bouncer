@@ -5,6 +5,7 @@
  *  this union. Re-exported here so existing `import { SiteId } from '../types'`
  *  call sites keep working without touching every consumer. */
 import type { SiteId } from './shared/platforms';
+import type { RuleOptionsMap } from './shared/rules';
 export type { SiteId };
 
 /** Where the filter box is rendered on a platform.
@@ -211,6 +212,7 @@ interface SettingsBase {
   openrouterApiKey: string;
   geminiApiKey: string;
   anthropicApiKey: string;
+  typesafeApiKey: string;
   enabled: boolean;
   useEmbeddings: boolean;
   selectedModel: string;
@@ -235,6 +237,7 @@ interface SettingsBase {
 }
 
 export interface Settings extends SettingsBase {
+  ruleOptions: RuleOptionsMap;
   descriptions: string[];
   /** `descriptions` minus the phrases that only engage AI detection
    *  (AiFilterIntentState.aiPhrases). The exclusion applies only on the
@@ -455,6 +458,7 @@ export interface IOSDeps {
 
 /** Per-site description keys, derived from SiteId. */
 type DescriptionKeys = { [K in SiteId as `descriptions_${K}`]: string[] };
+type RuleOptionsKeys = { [K in SiteId as `ruleOptions_${K}`]: RuleOptionsMap };
 
 /** Per-platform master-switch keys, derived from SiteId. Adding a new
  *  platform automatically extends this map. */
@@ -555,7 +559,7 @@ export type StorageSchema = SettingsBase & {
   // descriptions_* namespace so the pipeline and AI-intent aggregation never
   // see the inactive list.
   linkedinInactiveModePhrases: string[];
-} & DescriptionKeys & PlatformEnabledKeys & FilteringPausedKeys & ExcludedAccountsKeys;
+} & DescriptionKeys & RuleOptionsKeys & PlatformEnabledKeys & FilteringPausedKeys & ExcludedAccountsKeys;
 
 // ==================== API Response Types ====================
 
