@@ -5,6 +5,7 @@ import type {
   SiteId,
   StorageSchema,
 } from '../types';
+import { activeRuleDescriptions, type RuleOptionsMap } from './rules';
 
 /** Typed wrapper around chrome.storage.local.get(). Values may be undefined if not yet set. */
 export async function getStorage<K extends keyof StorageSchema>(
@@ -128,6 +129,20 @@ export async function setExcludedAccounts(siteId: SiteId, accounts: string[]): P
 
 export async function getDescriptions(descriptionsKey: DescriptionKey): Promise<string[]> {
   return loadMainList(siteIdFromDescKey(descriptionsKey));
+}
+
+export async function getRuleOptions(siteId: SiteId): Promise<RuleOptionsMap> {
+  const key = `ruleOptions_${siteId}` as const;
+  const data = await chrome.storage.local.get([key]);
+  const value = data[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as RuleOptionsMap : {};
+}
+
+export async function getActiveDescriptions(descriptionsKey: DescriptionKey): Promise<string[]> {
+  const [descriptions, options] = await Promise.all([
+    getDescriptions(descriptionsKey), getRuleOptions(siteIdFromDescKey(descriptionsKey)),
+  ]);
+  return activeRuleDescriptions(descriptions, options);
 }
 
 export async function setDescriptions(descriptionsKey: DescriptionKey, descriptions: string[]): Promise<void> {

@@ -33,7 +33,10 @@ vi.mock('../../src/background/providers.js', () => ({
   callImbueAPI: vi.fn(),
 }));
 
-import { classifyError, enqueuePost, isKeyPending, clearTabQueue, setActiveTab, scheduleBatch, getSettings } from '../../src/background/pipeline.js';
+vi.mock('../../src/background/jev', () => ({ callJevAPI: vi.fn() }));
+
+import { classifyError, enqueuePost, isKeyPending, clearTabQueue, setActiveTab, scheduleBatch, getSettings, handleSettingsChange, evaluationCache } from '../../src/background/pipeline.js';
+import { callJevAPI } from '../../src/background/jev';
 import { AI_DETECTION_SEED_PHRASE } from '../../src/shared/utils.js';
 import { localEngine, callLocalInference } from '../../src/background/local-model.js';
 import type { PendingEvaluation } from '../../src/types.js';
@@ -303,6 +306,28 @@ describe('getSettings effectiveDescriptions', () => {
     });
   });
 
+  it('passes only enabled rules and the TypeSafe key to Jev', async () => {
+    store.selectedModel = 'typesafe:jev-latest';
+    store.typesafeApiKey = 'test-key';
+    store.descriptions_twitter = ['hype', 'paused rule'];
+    store.ruleOptions_twitter = { 'paused rule': { enabled: false, threshold: 0.9 } };
+    store.ruleOptions_youtube = { hype: { enabled: false, threshold: 0.9 } };
+    const settings = await getSettings('twitter');
+    expect(settings.effectiveDescriptions).toEqual(['hype']);
+    expect(settings.typesafeApiKey).toBe('test-key');
+    expect(settings.ruleOptions).toEqual(store.ruleOptions_twitter);
+  });
+
+  it('a disabled AI rule cannot activate the AI detector', async () => {
+    store.selectedModel = 'iosLocal:gemma-4-e2b-detector-v2';
+    store.descriptions_twitter = ['AI slop'];
+    store.ruleOptions_twitter = { 'AI slop': { enabled: false, threshold: 0.85 } };
+    store.aiFilterIntent = { aiPhrases: ['AI slop'], judgedSetKey: 'k', updatedAt: 1 };
+    const settings = await getSettings('twitter');
+    expect(settings.descriptions).toEqual([]);
+    expect(settings.aiFilterIntentActive).toBe(false);
+  });
+
   it('excludes the seed phrase by construction, before any intent verdict lands', async () => {
     // The race this guards against: the sparkle click writes the seed phrase
     // into the platform's list, and aiFilterIntent hasn't been updated yet.
@@ -362,5 +387,33 @@ describe('getSettings effectiveDescriptions', () => {
 
     const settings = await getSettings('twitter');
     expect(settings.aiFilterIntentActive).toBe(true);
+  });
+});
+
+describe('rules changed during Jev evaluation', () => {
+  it('discards an old hide result, its live UI update and its cache entry', async () => {
+    const tabId = 99;
+    setActiveTab(null);
+    clearTabQueue(tabId);
+    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+      selectedModel: 'typesafe:jev-latest', typesafeApiKey: 'test-key', descriptions_twitter: ['hype'],
+    });
+    let finish!: (result: { shouldHide: boolean; reasoning: string; matches: string[] }) => void;
+    vi.mocked(callJevAPI).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const resolve = vi.fn();
+    const key = 'post-during-rule-edit';
+    enqueuePost(tabId, makePendingItem({ post: 'test', cacheKey: key, resolve, evaluationId: 'stale-rule-eval' }));
+    setActiveTab(tabId);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await handleSettingsChange({ ruleOptions_twitter: { newValue: { hype: { enabled: false, threshold: 0.85 } } } });
+    vi.mocked(chrome.tabs.sendMessage).mockClear();
+    finish({ shouldHide: true, reasoning: 'old rule matched', matches: ['hype'] });
+    await vi.waitFor(() => expect(resolve).toHaveBeenCalled());
+    expect(resolve.mock.calls[0][0]).toMatchObject({ retry: true });
+    expect(evaluationCache.has(key)).toBe(false);
+    expect(vi.mocked(chrome.tabs.sendMessage).mock.calls.some(([, message]) =>
+      message.type === 'detectorResponse' && message.evaluationId === 'stale-rule-eval')).toBe(false);
+    setActiveTab(null);
+    clearTabQueue(tabId);
   });
 });

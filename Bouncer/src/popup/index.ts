@@ -408,7 +408,7 @@ async function loadSettings() {
     'openrouterApiKey',
     'openaiApiKey',
     'openaiApiBase',
-    'geminiApiKey',
+    'geminiApiKey', 'typesafeApiKey',
     'anthropicApiKey',
     'predefinedModelKwargs',
     'authErrorApis',
@@ -430,6 +430,7 @@ async function loadSettings() {
   pendingLocalSelection = data.pendingLocalModelSelection || null;
 
   // API keys
+  (document.getElementById('typesafeApiKey') as HTMLInputElement).value = data.typesafeApiKey || '';
   (document.getElementById('openaiApiKey') as HTMLInputElement).value = data.openaiApiKey || '';
   (document.getElementById('openaiApiBase') as HTMLInputElement).value = data.openaiApiBase || '';
   (document.getElementById('geminiApiKey') as HTMLInputElement).value = data.geminiApiKey || '';
@@ -695,6 +696,7 @@ function updateApiProviderStates(data: Partial<StorageSchema>) {
     openrouter: !!data.openrouterApiKey,
     openai: !!data.openaiApiKey,
     gemini: !!data.geminiApiKey,
+    typesafe: !!data.typesafeApiKey,
     anthropic: !!data.anthropicApiKey,
     local: true,
     iosLocal: true
@@ -728,6 +730,11 @@ function updateApiProviderStates(data: Partial<StorageSchema>) {
   } else {
     openaiBadge.textContent = 'Not enabled';
   }
+
+  const typesafeBadge = document.getElementById('typesafeStatusBadge')!;
+  typesafeBadge.classList.toggle('connected', !!data.typesafeApiKey && !authErrorApis.typesafe);
+  typesafeBadge.classList.toggle('auth-error', !!data.typesafeApiKey && !!authErrorApis.typesafe);
+  typesafeBadge.textContent = !data.typesafeApiKey ? 'Not enabled' : authErrorApis.typesafe ? 'Auth error' : 'Enabled';
 
   // Update Gemini badge
   const geminiBadge = document.getElementById('geminiStatusBadge')!;
@@ -767,6 +774,12 @@ function updateApiProviderStates(data: Partial<StorageSchema>) {
 
 function setupEventListeners() {
 
+  document.getElementById('typesafeApiKey')!.addEventListener('change', asyncHandler(async () => {
+    const key = (document.getElementById('typesafeApiKey') as HTMLInputElement).value.trim();
+    await setStorage({ typesafeApiKey: key });
+    await loadSettings();
+  }));
+
   // Headline model radios (Imbue vs Local E2B)
   setupModelRadios();
 
@@ -793,7 +806,7 @@ function setupEventListeners() {
   document.getElementById('openaiApiKey')!.addEventListener('change', (e) => { (async () => {
     const key = (e.target as HTMLInputElement).value.trim();
     await setStorage({ openaiApiKey: key });
-    const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'openaiApiBase', 'geminiApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
+    const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'openaiApiBase', 'geminiApiKey', 'typesafeApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
     updateApiProviderStates(data);
     renderModelDropdown(data.customModels || [], data.selectedModel || DEFAULT_MODEL);
   })().catch(err => console.error('[Popup] openaiApiKey change failed:', err)); });
@@ -864,7 +877,7 @@ function setupEventListeners() {
             await setStorage({ authErrorApis: authErrors429 });
           }
           await setStorage({ anthropicApiKey: key });
-          const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
+          const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'typesafeApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
           updateApiProviderStates(data);
           updateAnthropicEnabledUI(true);
           renderModelDropdown(data.customModels || [], data.selectedModel || DEFAULT_MODEL);
@@ -882,7 +895,7 @@ function setupEventListeners() {
         }
         // Success — save the key
         await setStorage({ anthropicApiKey: key });
-        const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
+        const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'typesafeApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
         updateApiProviderStates(data);
         updateAnthropicEnabledUI(true);
         renderModelDropdown(data.customModels || [], data.selectedModel || DEFAULT_MODEL);
@@ -903,7 +916,7 @@ function setupEventListeners() {
     await removeStorage('anthropicApiKey');
     anthropicKeyInput.value = '';
     updateAnthropicEnabledUI(false);
-    const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
+    const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'typesafeApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
     updateApiProviderStates(data);
     renderModelDropdown(data.customModels || [], data.selectedModel || DEFAULT_MODEL);
   })().catch(err => console.error('[Popup] Anthropic disable failed:', err)); });
@@ -912,7 +925,7 @@ function setupEventListeners() {
   document.getElementById('geminiApiKey')!.addEventListener('change', (e) => { (async () => {
     const key = (e.target as HTMLInputElement).value.trim();
     await setStorage({ geminiApiKey: key });
-    const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
+    const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'typesafeApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
     updateApiProviderStates(data);
     renderModelDropdown(data.customModels || [], data.selectedModel || DEFAULT_MODEL);
   })().catch(err => console.error('[Popup] geminiApiKey change failed:', err)); });
@@ -1602,7 +1615,7 @@ function renderModelDropdown(customModels: ModelDef[], selectedModel: string) {
   }
 
   // Count how many alternative APIs are configured and have models
-  const providers = ['openai', 'anthropic', 'gemini', 'openrouter'];
+  const providers = ['typesafe', 'openai', 'anthropic', 'gemini', 'openrouter'];
   const configuredProviders = providers.filter(api => {
     if (!dropdownState.authenticatedApis[api]) return false;
     const { predefined, custom } = getModelsForProvider(api);
@@ -1980,7 +1993,7 @@ async function startOpenRouterOAuth() {
 
 // Update the UI to show OpenRouter connection status
 async function updateOpenRouterStatus() {
-  const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
+  const data = await getStorage(['openrouterApiKey', 'openaiApiKey', 'geminiApiKey', 'typesafeApiKey', 'anthropicApiKey', 'customModels', 'selectedModel', 'authErrorApis']);
   const signedOutSection = document.getElementById('openrouterSignedOut')!;
   const signedInSection = document.getElementById('openrouterSignedIn')!;
 

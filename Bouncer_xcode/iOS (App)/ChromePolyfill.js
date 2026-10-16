@@ -9,6 +9,12 @@
   const SYNC_PREFIX = 'ff_sync_';
   const LOCAL_PREFIX = 'ff_local_';
 
+  // Only the app's isolated content world receives this handler. The page
+  // cannot call it or read the provider key. The native endpoint is fixed.
+  if (typeof webkit !== 'undefined' && webkit.messageHandlers.feedfilterJev) {
+    window.__ff_typesafeRequest = payload => webkit.messageHandlers.feedfilterJev.postMessage(payload);
+  }
+
   // --- Storage change listeners ---
   const storageChangeListeners = [];
 

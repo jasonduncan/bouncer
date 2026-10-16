@@ -235,6 +235,24 @@
     <section>
       <label>Additional model providers</label>
 
+      <div class="api-provider" id="typesafeProvider">
+        <div class="api-provider-header" data-provider="typesafe">
+          <span class="api-provider-name">Jev · TypeSafe</span>
+          <div class="api-provider-header-right">
+            <span id="typesafeStatusBadge" class="api-status-badge">Not enabled</span>
+            <span class="api-provider-arrow" aria-hidden="true"></span>
+          </div>
+        </div>
+        <div class="api-provider-content" id="typesafeContent">
+          <div class="api-field">
+            <label for="typesafeApiKey">API Key</label>
+            <input type="password" id="typesafeApiKey" placeholder="TypeSafe API key" autocomplete="off">
+          </div>
+          <p class="hint">Scores each enabled rule against post text. Images and linked pages are not evaluated.</p>
+          <a href="https://console.typesafe.ai" target="_blank" rel="noopener noreferrer">Get a TypeSafe API key</a>
+        </div>
+      </div>
+
       <!-- OpenRouter OAuth -->
       <div class="api-provider" id="openrouterProvider">
         <div class="api-provider-header" data-provider="openrouter">

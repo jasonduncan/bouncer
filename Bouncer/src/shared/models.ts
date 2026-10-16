@@ -73,6 +73,9 @@ export const PREDEFINED_MODELS: PredefinedModelsMap = {
   openai: [
     { name: 'gpt-5-nano', display: 'GPT-5 Nano', apiKwargs: { reasoning_effort: "minimal" } },
   ],
+  typesafe: [
+    { name: 'jev-latest', display: 'Jev (TypeSafe)', supportsImages: false },
+  ],
   gemini: [
     { name: 'gemini-2.5-flash-lite', display: 'Gemini 2.5 Flash Lite' },
     { name: 'gemini-2.5-flash', display: 'Gemini 2.5 Flash' },
@@ -103,6 +106,7 @@ export const PREDEFINED_MODELS: PredefinedModelsMap = {
 export const DEFAULT_MODEL = process.env.HAS_IMBUE_BACKEND === 'true' ? 'imbue' : '';
 
 export const API_DISPLAY_NAMES: Record<string, string> = {
+  typesafe: 'TypeSafe / Jev',
   openai: 'OpenAI',
   gemini: 'Gemini',
   anthropic: 'Anthropic',
